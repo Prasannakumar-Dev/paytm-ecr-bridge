@@ -29,6 +29,3 @@ def initiate():
             display_flag = False
 
 initiate()
-
-
-
