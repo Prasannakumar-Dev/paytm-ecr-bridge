@@ -1,0 +1,9 @@
+build
+dist
+env
+Output
+bridge.spec
+__pycache__
+*.log
+*.json
+installer.iss
