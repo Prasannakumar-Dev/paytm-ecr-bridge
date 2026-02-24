@@ -1,24 +1,23 @@
 import os
+import sys
 import json
 import logging
-import sys
-import concurrent.futures
+import threading
 import serial.tools.list_ports
 from fastapi import FastAPI
 from pydantic import BaseModel
 from paytm_payments import payments
 
-# ---------------- INIT ---------------- #
-
 logging.basicConfig(
     filename="paytm_bridge.log",
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
 
 app = FastAPI(title="Healthligence Paytm Bridge")
 
-# ---------------- UTILITIES ---------------- #
+device_lock = threading.Lock()
+
 
 def get_base_path():
     if getattr(sys, 'frozen', False):
@@ -41,23 +40,6 @@ def is_port_available(port_name: str):
     return any(port.device.upper() == port_name.upper() for port in ports)
 
 
-def execute_with_timeout(func, timeout=180):
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(func)
-        return future.result(timeout=timeout)
-
-
-def create_payment_instance(config: dict):
-    """
-    Create fresh SDK instance with full config.
-    This ensures COM port is properly initialized.
-    """
-    logging.info(f"Creating SDK instance with config: {config}")
-    return payments.Payments(**config)
-
-
-# ---------------- MODELS ---------------- #
-
 class SaleRequest(BaseModel):
     order_id: str
     amount: str
@@ -67,8 +49,6 @@ class SaleRequest(BaseModel):
 class StatusRequest(BaseModel):
     order_id: str
 
-
-# ---------------- ROUTES ---------------- #
 
 @app.get("/health")
 def health():
@@ -84,105 +64,84 @@ def health():
 
     except Exception as e:
         logging.error(f"HEALTH ERROR: {str(e)}")
-        return {
-            "status": "error",
-            "message": str(e)
-        }
+        return {"status": "error", "message": str(e)}
 
 
 @app.post("/sale")
 def sale(data: SaleRequest):
-    try:
-        configs = get_configs()
-        sale_config = configs["Sale"]
 
-        port = sale_config["port_name"]
+    with device_lock:
+        try:
+            configs = get_configs()
+            sale_config = configs["Sale"]
 
-        if not is_port_available(port):
-            return {
-                "status": "error",
-                "message": f"Device not connected on {port}"
-            }
+            port = sale_config["port_name"]
 
-        # Inject dynamic fields
-        sale_config["order_id"] = data.order_id
-        sale_config["amount"] = data.amount
-        sale_config["payment_mode"] = data.payment_mode
+            if not is_port_available(port):
+                return {
+                    "status": "error",
+                    "message": f"Device not connected on {port}"
+                }
 
-        logging.info(f"SALE START | ORDER: {data.order_id} | AMOUNT: {data.amount}")
+            # Inject dynamic fields
+            sale_config["order_id"] = data.order_id
+            sale_config["amount"] = data.amount
+            sale_config["payment_mode"] = data.payment_mode
 
-        # 🔥 Fresh SDK instance per transaction
-        sdk = create_payment_instance(sale_config)
+            logging.info(f"SALE START | {sale_config}")
 
-        def call_sale():
-            return sdk.Sale()
+            # 🔥 Create fresh SDK instance every time
+            sdk = payments.Payments()
 
-        response = execute_with_timeout(call_sale, timeout=180)
+            response = sdk.Sale(**sale_config)
 
-        logging.info(f"SALE RESPONSE | ORDER: {data.order_id} | RESPONSE: {response}")
+            logging.info(f"SALE RESPONSE | {response}")
 
-        return response
+            return response
 
-    except concurrent.futures.TimeoutError:
-        logging.error(f"SALE TIMEOUT | ORDER: {data.order_id}")
-        return {
-            "status": "timeout",
-            "message": "Transaction timed out"
-        }
-
-    except Exception as e:
-        logging.error(f"SALE ERROR | ORDER: {data.order_id} | {str(e)}")
-        return {
-            "status": "error",
-            "message": str(e)
-        }
+        except Exception as e:
+            logging.error(f"SALE ERROR | {str(e)}")
+            return {"status": "error", "message": str(e)}
 
 
 @app.post("/status")
 def status(data: StatusRequest):
-    try:
-        configs = get_configs()
-        status_config = configs["Status"]
 
-        port = status_config["port_name"]
+    with device_lock:  # 🔥 SERIALIZE DEVICE ACCESS
+        try:
+            configs = get_configs()
+            status_config = configs["Status"]
 
-        if not is_port_available(port):
-            return {
-                "status": "error",
-                "message": f"Device not connected on {port}"
-            }
+            port = status_config["port_name"]
 
-        status_config["order_id"] = data.order_id
+            if not is_port_available(port):
+                return {
+                    "status": "error",
+                    "message": f"Device not connected on {port}"
+                }
 
-        logging.info(f"STATUS START | ORDER: {data.order_id}")
+            status_config["order_id"] = data.order_id
 
-        sdk = create_payment_instance(status_config)
+            logging.info(f"STATUS START | {status_config}")
 
-        def call_status():
-            return sdk.Status()
+            sdk = payments.Payments()
 
-        response = execute_with_timeout(call_status, timeout=60)
+            response = sdk.Status(**status_config)
 
-        logging.info(f"STATUS RESPONSE | ORDER: {data.order_id} | RESPONSE: {response}")
+            logging.info(f"STATUS RESPONSE | {response}")
 
-        return response
+            return response
 
-    except concurrent.futures.TimeoutError:
-        logging.error(f"STATUS TIMEOUT | ORDER: {data.order_id}")
-        return {
-            "status": "timeout",
-            "message": "Status request timed out"
-        }
-
-    except Exception as e:
-        logging.error(f"STATUS ERROR | ORDER: {data.order_id} | {str(e)}")
-        return {
-            "status": "error",
-            "message": str(e)
-        }
-
-# ---------------- SERVER ENTRY ---------------- #
+        except Exception as e:
+            logging.error(f"STATUS ERROR | {str(e)}")
+            return {"status": "error", "message": str(e)}
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8899)
+
+    uvicorn.run(
+        app,
+        host="127.0.0.1",
+        port=8899,
+        workers=1
+    )
