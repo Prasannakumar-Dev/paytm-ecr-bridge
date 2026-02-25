@@ -138,10 +138,19 @@ def status(data: StatusRequest):
 
 if __name__ == "__main__":
     import uvicorn
+    from gen_cert import generate_self_signed_cert
+
+    base = get_base_path()
+    cert_dir = os.path.join(base, "certs")
+    os.makedirs(cert_dir, exist_ok=True)
+
+    key_path, cert_path = generate_self_signed_cert(cert_dir)
 
     uvicorn.run(
         app,
         host="127.0.0.1",
         port=8899,
-        workers=1
+        workers=1,
+        ssl_keyfile=key_path,
+        ssl_certfile=cert_path,
     )
